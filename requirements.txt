@@ -6,13 +6,13 @@
 #
 
 -i https://pypi.org/simple/
-beautifulsoup4==4.6.3
-certifi==2022.12.7
-chardet==3.0.4
-deprecated==1.2.10
-idna==2.10
-pygithub==1.51
-pyjwt==1.7.1
-requests==2.24.0
-urllib3==1.25.9
-wrapt==1.12.1
+beautifulsoup4
+certifi
+chardet
+deprecated
+idna
+pygithub
+pyjwt
+requests
+urllib3
+wrapt
