@@ -1,121 +1,142 @@
-from collections import namedtuple
-import datetime
-import math
 import os
 import sys
-from bs4 import BeautifulSoup
-from typing import List
-from github.InputFileContent import InputFileContent
 import json
-
+import time
 import requests
-from github import Github
+from dataclasses import dataclass
+from typing import Final
 
-WIDTH_JUSTIFICATION_SEPARATOR = "."
-GIST_TITLE = "♟︎ Chess.com Ratings"
+# Constants
+WIDTH_JUSTIFICATION_SEPARATOR: Final = "."
+GIST_TITLE: Final = "♟︎ Chess.com Ratings"
 
-ENV_VAR_GIST_ID = "GIST_ID"
-ENV_VAR_GITHUB_TOKEN = "GH_TOKEN"
-ENV_VAR_CHESS_COM_USERNAME = "CHESS_COM_USERNAME"
-REQUIRED_ENVS = [
+ENV_VAR_GIST_ID: Final = "GIST_ID"
+ENV_VAR_GITHUB_TOKEN: Final = "GH_TOKEN"
+ENV_VAR_CHESS_COM_USERNAME: Final = "CHESS_COM_USERNAME"
+REQUIRED_ENVS: Final = [
     ENV_VAR_GIST_ID,
     ENV_VAR_GITHUB_TOKEN,
     ENV_VAR_CHESS_COM_USERNAME
 ]
 
-# LIVE_URL_FORMAT = "https://www.chess.com/stats/live/{format}/{user}"
-# PUZZLES_URL_FORMAT = "https://www.chess.com/stats/{format}/{user}"
-# DAILY_URL_FORMAT = "https://www.chess.com/stats/{format}/chess/{user}"
-STATS_URL = "https://api.chess.com/pub/player/{user}/stats"
+STATS_URL: Final = "https://api.chess.com/pub/player/{user}/stats"
 
-TitleAndValue = namedtuple("TitleAndValue", "title value")
-
+@dataclass(frozen=True)
+class TitleAndValue:
+    title: str
+    value: str
 
 def validate_and_init() -> bool:
+    """Check if all required environment variables are set."""
     env_vars_absent = [
-        env
-        for env in REQUIRED_ENVS
-        if env not in os.environ or len(os.environ[env]) == 0
+        env for env in REQUIRED_ENVS 
+        if not os.environ.get(env)
     ]
+    
     if env_vars_absent:
-        print(f"Please define {env_vars_absent} in your github secrets. Aborting...")
+        print(f"Error: Missing environment variables: {', '.join(env_vars_absent)}")
         return False
-
     return True
 
+def get_adjusted_line(stat: TitleAndValue, max_line_length: int) -> str:
+    """Formats a line with dots justification."""
+    # Calculate spacing: total length - (title + value + 2 spaces surrounding dots)
+    spacing = max_line_length - (len(stat.title) + len(stat.value) + 2)
+    separator = f" {WIDTH_JUSTIFICATION_SEPARATOR * spacing} "
+    return f"{stat.title}{separator}{stat.value}"
 
-def get_adjusted_line(title_and_value: TitleAndValue, max_line_length: int) -> str:
-    separation = max_line_length - (
-        len(title_and_value.title) + len(title_and_value.value) + 2
-    )
-    separator = f" {WIDTH_JUSTIFICATION_SEPARATOR * separation} "
-    return title_and_value.title + separator + title_and_value.value
-
-
-def get_chess_com_stats(user: str = "sciencepal") -> dict:
+def get_chess_com_stats(user: str) -> dict:
+    """Fetch stats from Chess.com Public API."""
     headers = {
-        'User-Agent': f'chess-com-box-py @{user}'
+        'User-Agent': f'chess-com-box-py (@{user})'
     }
-    stats_dict = requests.get(STATS_URL.format(user=user), headers=headers).json()
-    return stats_dict
-
+    try:
+        response = requests.get(STATS_URL.format(user=user), headers=headers, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"Error fetching Chess.com stats: {e}")
+        return {}
 
 def get_rating_line(
     stats_key: str, chess_emoji: str, chess_format: str, chess_stats: dict
 ) -> TitleAndValue:
+    """Extracts the rating and returns a TitleAndValue object."""
     try:
-        rating = str(chess_stats.get(stats_key).get("highest" if (chess_format == "Tactics") else "last").get("rating"))
-    except Exception as e:
-        rating = "N/A"
-    return TitleAndValue(chess_emoji + " " + chess_format, rating + " 📈")
+        # Use .get() chains to avoid KeyError
+        data = chess_stats.get(stats_key, {})
+        # Tactics uses 'highest', games use 'last'
+        field = "highest" if chess_format == "Tactics" else "last"
+        rating = data.get(field, {}).get("rating")
+        
+        rating_str = f"{rating} 📈" if rating else "N/A"
+    except (AttributeError, TypeError):
+        rating_str = "N/A"
+        
+    return TitleAndValue(f"{chess_emoji} {chess_format}", rating_str)
 
-
-def update_gist(title: str, content: str) -> bool:
+def update_gist(title: str, content: str) -> None:
+    """Updates the GitHub Gist using the REST API."""
     access_token = os.environ[ENV_VAR_GITHUB_TOKEN]
     gist_id = os.environ[ENV_VAR_GIST_ID]
-    # gist = Github(access_token).get_gist(gist_id)
-    # # Shouldn't necessarily work, keeping for case of single file made in hurry to get gist id.
-    # old_title = list(gist.files.keys())[0]
-    # gist.edit(title, {old_title: InputFileContent(content, title)})
-    headers = {'Authorization': f'token {access_token}'}
-    r = requests.patch('https://api.github.com/gists/' + gist_id, data=json.dumps({'files':{title:{"content":content}}}),headers=headers) 
-    print(f"{title}\n{content}")
+    
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    
+    payload = {
+        'files': {
+            title: {'content': content}
+        }
+    }
+    
+    try:
+        r = requests.patch(
+            f'https://api.github.com/gists/{gist_id}', 
+            json=payload, 
+            headers=headers,
+            timeout=10
+        )
+        r.raise_for_status()
+        print(f"Successfully updated Gist:\n{content}")
+    except requests.RequestException as e:
+        print(f"Error updating GitHub Gist: {e}")
 
-
-def main():
-
+def main() -> None:
     if not validate_and_init():
-        return
+        sys.exit(1)
 
-    chess_com_user_name = os.environ[ENV_VAR_CHESS_COM_USERNAME]
-    chess_stats = get_chess_com_stats(chess_com_user_name)
+    username = os.environ[ENV_VAR_CHESS_COM_USERNAME]
+    stats = get_chess_com_stats(username)
 
-    blitz_line = get_rating_line("chess_blitz", "⚡", "Blitz", chess_stats)
-    bullet_line = get_rating_line("chess_bullet", "🚅", "Bullet", chess_stats)
-    rapid_line = get_rating_line("chess_rapid", "⏲️", "Rapid", chess_stats)
-    puzzles_line = get_rating_line("tactics", "🧩", "Tactics", chess_stats)
-    daily_line = get_rating_line("chess_daily", "☀️", "Daily", chess_stats)
-
-    lines = [
-        get_adjusted_line(blitz_line, 52),
-        get_adjusted_line(bullet_line, 52),
-        get_adjusted_line(rapid_line, 53),
-        get_adjusted_line(puzzles_line, 52),
-        get_adjusted_line(daily_line, 53)
+    # Configuration for lines: (Key, Emoji, Label, Line Width)
+    configs = [
+        ("chess_blitz", "⚡", "Blitz", 52),
+        ("chess_bullet", "🚅", "Bullet", 52),
+        ("chess_rapid", "⏲️", "Rapid", 53),
+        ("tactics", "🧩", "Tactics", 52),
+        ("chess_daily", "☀️", "Daily", 53)
     ]
+
+    lines = []
+    for key, emoji, label, width in configs:
+        stat_line = get_rating_line(key, emoji, label, stats)
+        lines.append(get_adjusted_line(stat_line, width))
+
     content = "\n".join(lines)
     update_gist(GIST_TITLE, content)
 
-
 if __name__ == "__main__":
-    import time
-
-    s = time.perf_counter()
-    # test with python chess_com_box.py test <gist> <github-token> <user>
-    if len(sys.argv) > 1:
+    start_time = time.perf_counter()
+    
+    # Support CLI arguments for local testing
+    if len(sys.argv) == 5:
         os.environ[ENV_VAR_GIST_ID] = sys.argv[2]
         os.environ[ENV_VAR_GITHUB_TOKEN] = sys.argv[3]
         os.environ[ENV_VAR_CHESS_COM_USERNAME] = sys.argv[4]
+
     main()
-    elapsed = time.perf_counter() - s
-    print(f"{__file__} executed in {elapsed:0.2f} seconds.")
+    
+    elapsed = time.perf_counter() - start_time
+    print(f"Executed in {elapsed:0.2f} seconds.")
